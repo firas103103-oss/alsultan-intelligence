@@ -4,7 +4,8 @@ import { streamText } from 'ai';
 import { createClient } from '@supabase/supabase-js';
 import { QURANIC_DATA, QURAN_SYSTEM_PROMPT } from '../data/quranic.js';
 import { normalizeArabic, countOccurrences, summarizeContexts, suggestSimilarWords } from '../lib/lexicon.js';
-import { buildWordTemplate, buildGeneralTemplate, OPENING_GREETING } from '../lib/responseTemplate.js';
+import { buildWordTemplate, buildGeneralTemplate } from '../lib/responseTemplate.js';
+import { SultanAnalysisEngine } from '../engine/SultanAnalysisEngine.js';
 
 const router = Router();
 
@@ -12,7 +13,7 @@ const router = Router();
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const isSupabaseEnabled = supabaseUrl && supabaseKey;
-const supabase = isSupabaseEnabled 
+const supabase = isSupabaseEnabled
   ? createClient(supabaseUrl, supabaseKey)
   : null;
 
@@ -81,6 +82,24 @@ router.get('/quranic/data', (req, res) => {
   } catch (error) {
     console.error('Error fetching Quranic data:', error);
     res.status(500).json({ error: 'Failed to fetch Quranic data' });
+  }
+});
+
+// POST: Semantic search — grounded Quranic verses (SultanAnalysisEngine)
+router.post('/semantic-search', async (req, res) => {
+  try {
+    const { query, topK = 10 } = req.body as { query?: string; topK?: number };
+    if (!query || typeof query !== 'string') {
+      return res.status(400).json({ error: 'query required' });
+    }
+    const results = await SultanAnalysisEngine.semanticSearch(query, Math.min(topK || 10, 20));
+    res.json({
+      verses: results.map((r) => ({ verse: r.verse, score: r.score })),
+      count: results.length,
+    });
+  } catch (error) {
+    console.error('Error in semantic search:', error);
+    res.status(500).json({ error: 'Semantic search failed' });
   }
 });
 
@@ -176,6 +195,22 @@ router.post('/', async (req, res) => {
       const isFirstMessage = messages.length <= 1; // Only first turn
       const genTemplate = buildGeneralTemplate(lastUser.content, isFirstMessage);
       enhancedMessages.push({ role: 'user', content: genTemplate });
+
+      // RAG: Inject semantic search context from SultanAnalysisEngine (when Ollama available)
+      try {
+        const contextVerses = await SultanAnalysisEngine.getContextForQuery(lastUser.content, 5);
+        if (contextVerses.length > 0) {
+          const contextText = contextVerses
+            .map((v) => `[${v.surahName} ${v.ayahNumber}] ${v.text}`)
+            .join('\n');
+          enhancedMessages.push({
+            role: 'user',
+            content: `آيات ذات صلة دلالية بالاستفسار:\n${contextText}`,
+          });
+        }
+      } catch {
+        // Ollama may be unavailable — continue without RAG
+      }
     }
 
     enhancedMessages.push(...messages);
